@@ -4,7 +4,8 @@ mod layout;
 
 use crate::db;
 use crate::model::{
-    FilterOperator, FilterSpec, ObjectDetails, ObjectKind, RowSet, SchemaObject, SortSpec,
+    DatabaseTarget, FilterOperator, FilterSpec, ObjectDetails, PgSslMode, RowSet, SchemaObject,
+    SortSpec,
 };
 use crate::settings::Settings;
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -20,11 +21,69 @@ use std::{
 const QUERY_CAP: usize = 10_000;
 
 enum TaskEvent {
-    Opened(PathBuf, db::Result<Vec<SchemaObject>>),
-    Details(PathBuf, String, db::Result<ObjectDetails>),
-    Page(PathBuf, String, usize, db::Result<(RowSet, u64)>),
-    Query(db::Result<RowSet>),
-    Exported(PathBuf, db::Result<u64>),
+    Opened(DatabaseTarget, db::Result<Vec<SchemaObject>>),
+    Details(DatabaseTarget, String, db::Result<ObjectDetails>),
+    Page(DatabaseTarget, String, usize, db::Result<(RowSet, u64)>),
+    Query(DatabaseTarget, db::Result<RowSet>),
+    Exported(DatabaseTarget, PathBuf, db::Result<u64>),
+}
+
+#[derive(Default)]
+struct PgForm {
+    host: String,
+    port: String,
+    database: String,
+    user: String,
+    password: String,
+    ssl_mode: PgSslMode,
+}
+impl PgForm {
+    fn new() -> Self {
+        Self {
+            host: "localhost".into(),
+            port: "5432".into(),
+            ssl_mode: PgSslMode::Prefer,
+            ..Default::default()
+        }
+    }
+    fn from_target(target: &DatabaseTarget) -> Self {
+        if let DatabaseTarget::PostgreSQL {
+            host,
+            port,
+            database,
+            user,
+            ssl_mode,
+            ..
+        } = target
+        {
+            Self {
+                host: host.clone(),
+                port: port.to_string(),
+                database: database.clone(),
+                user: user.clone(),
+                password: String::new(),
+                ssl_mode: *ssl_mode,
+            }
+        } else {
+            Self::new()
+        }
+    }
+    fn valid(&self) -> bool {
+        !self.host.trim().is_empty()
+            && !self.database.trim().is_empty()
+            && !self.user.trim().is_empty()
+            && self.port.parse::<u16>().is_ok()
+    }
+    fn target(&self) -> Option<DatabaseTarget> {
+        Some(DatabaseTarget::PostgreSQL {
+            host: self.host.trim().into(),
+            port: self.port.parse().ok()?,
+            database: self.database.trim().into(),
+            user: self.user.trim().into(),
+            password: self.password.clone(),
+            ssl_mode: self.ssl_mode,
+        })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -37,7 +96,10 @@ enum MainTab {
 
 pub struct ViewerApp {
     settings: Settings,
-    database_path: Option<PathBuf>,
+    database_target: Option<DatabaseTarget>,
+    show_open_choice: bool,
+    show_pg_form: bool,
+    pg_form: PgForm,
     schema: Vec<SchemaObject>,
     schema_search: String,
     selected: Option<usize>,
@@ -75,7 +137,10 @@ impl ViewerApp {
         let (tx, rx) = unbounded();
         Self {
             settings,
-            database_path: None,
+            database_target: None,
+            show_open_choice: false,
+            show_pg_form: false,
+            pg_form: PgForm::new(),
             schema: Vec::new(),
             schema_search: String::new(),
             selected: None,
@@ -117,19 +182,19 @@ impl ViewerApp {
         });
     }
 
-    fn open_database(&mut self, ctx: &egui::Context, path: PathBuf) {
+    fn open_database(&mut self, ctx: &egui::Context, target: DatabaseTarget) {
         self.error = None;
-        self.status = format!("Opening {}…", path.display());
-        let task_path = path.clone();
+        self.status = format!("Opening {}…", target.label());
+        let task_target = target.clone();
         self.spawn_task(ctx, move || {
-            TaskEvent::Opened(path, db::load_schema(&task_path))
+            TaskEvent::Opened(target, db::target_schema(&task_target))
         });
     }
 
     fn close_database(&mut self) {
         self.query_cancel.store(true, Ordering::Relaxed);
         self.export_cancel.store(true, Ordering::Relaxed);
-        self.database_path = None;
+        self.database_target = None;
         self.schema.clear();
         self.selected = None;
         self.details = None;
@@ -151,20 +216,21 @@ impl ViewerApp {
         self.filters.clear();
         self.sort = None;
         self.page = 0;
-        let Some(path) = self.database_path.clone() else {
+        let Some(target) = self.database_target.clone() else {
             return;
         };
         let object = self.schema[index].clone();
-        let detail_name = object.name.clone();
-        let detail_path = path.clone();
+        let details_object = object.clone();
+        let detail_name = object.qualified_name();
+        let detail_target = target.clone();
         self.spawn_task(ctx, move || {
             TaskEvent::Details(
-                detail_path.clone(),
+                detail_target.clone(),
                 detail_name.clone(),
-                db::load_details(&detail_path, &detail_name),
+                db::target_details(&detail_target, &details_object),
             )
         });
-        if matches!(object.kind, ObjectKind::Table | ObjectKind::View) {
+        if object.is_data_source() {
             self.active_tab = MainTab::Data;
             self.load_current_page(ctx);
         } else {
@@ -173,36 +239,36 @@ impl ViewerApp {
     }
 
     fn load_current_page(&mut self, ctx: &egui::Context) {
-        let Some(path) = self.database_path.clone() else {
+        let Some(target) = self.database_target.clone() else {
             return;
         };
         let Some(object) = self.selected_object().cloned() else {
             return;
         };
-        if !matches!(object.kind, ObjectKind::Table | ObjectKind::View) {
+        if !object.is_data_source() {
             return;
         }
         let filters = self.filters.clone();
         let sort = self.sort.clone();
         let page = self.page;
         let page_size = self.settings.page_size;
-        let name = object.name.clone();
-        self.status = format!("Loading {}…", object.name);
+        let name = object.qualified_name();
+        self.status = format!("Loading {name}…");
         self.spawn_task(ctx, move || {
-            let result = db::load_page(
-                &path,
-                &name,
+            let result = db::target_page(
+                &target,
+                &object,
                 &filters,
                 sort.as_ref(),
                 page * page_size,
                 page_size,
             );
-            TaskEvent::Page(path, name, page, result)
+            TaskEvent::Page(target, name, page, result)
         });
     }
 
     fn run_query(&mut self, ctx: &egui::Context) {
-        let Some(path) = self.database_path.clone() else {
+        let Some(target) = self.database_target.clone() else {
             self.error = Some("Open a database before running SQL".into());
             return;
         };
@@ -213,12 +279,13 @@ impl ViewerApp {
         self.query_result = None;
         self.status = "Running read-only query…".into();
         self.spawn_task(ctx, move || {
-            TaskEvent::Query(db::execute_query(&path, &sql, QUERY_CAP, cancel))
+            let result = db::target_query(&target, &sql, QUERY_CAP, cancel);
+            TaskEvent::Query(target, result)
         });
     }
 
     fn export(&mut self, ctx: &egui::Context) {
-        let Some(database) = self.database_path.clone() else {
+        let Some(database) = self.database_target.clone() else {
             return;
         };
         let Some(destination) = rfd::FileDialog::new()
@@ -236,13 +303,11 @@ impl ViewerApp {
         if self.active_tab == MainTab::Sql && self.query_result.is_some() {
             let sql = self.sql.clone();
             self.spawn_task(ctx, move || {
-                TaskEvent::Exported(
-                    event_destination,
-                    db::export_query(&database, &sql, &destination, cancel),
-                )
+                let result = db::target_export_query(&database, &sql, &destination, cancel);
+                TaskEvent::Exported(database, event_destination, result)
             });
         } else if let Some(object) = self.selected_object().cloned() {
-            if !matches!(object.kind, ObjectKind::Table | ObjectKind::View) {
+            if !object.is_data_source() {
                 self.error = Some("Select a table, view, or SQL result to export".into());
                 self.export_running = false;
                 return;
@@ -250,17 +315,15 @@ impl ViewerApp {
             let filters = self.filters.clone();
             let sort = self.sort.clone();
             self.spawn_task(ctx, move || {
-                TaskEvent::Exported(
-                    event_destination,
-                    db::export_table(
-                        &database,
-                        &object.name,
-                        &filters,
-                        sort.as_ref(),
-                        &destination,
-                        cancel,
-                    ),
-                )
+                let result = db::target_export_table(
+                    &database,
+                    &object,
+                    &filters,
+                    sort.as_ref(),
+                    &destination,
+                    cancel,
+                );
+                TaskEvent::Exported(database, event_destination, result)
             });
         }
     }
@@ -269,26 +332,34 @@ impl ViewerApp {
         while let Ok(event) = self.rx.try_recv() {
             self.busy_count = self.busy_count.saturating_sub(1);
             match event {
-                TaskEvent::Opened(path, result) => match result {
+                TaskEvent::Opened(target, result) => match result {
                     Ok(schema) => {
                         self.close_database();
-                        self.database_path = Some(path.clone());
+                        self.database_target = Some(target.clone());
                         self.schema = schema;
-                        self.settings.remember(&path);
+                        self.sql = match target {
+                            DatabaseTarget::SQLite { .. } => {
+                                "SELECT sqlite_version() AS sqlite_version;".into()
+                            }
+                            DatabaseTarget::PostgreSQL { .. } => {
+                                "SELECT version() AS postgresql_version;".into()
+                            }
+                        };
+                        self.settings.remember(&target);
                         self.settings.save();
                         self.status = format!(
                             "Opened {} ({} schema objects)",
-                            path.display(),
+                            target.label(),
                             self.schema.len()
                         );
                     }
                     Err(error) => self.error = Some(format!("Could not open database: {error}")),
                 },
-                TaskEvent::Details(path, name, result) => {
-                    if self.database_path.as_ref() == Some(&path)
+                TaskEvent::Details(target, name, result) => {
+                    if self.database_target.as_ref() == Some(&target)
                         && self
                             .selected_object()
-                            .is_some_and(|object| object.name == name)
+                            .is_some_and(|object| object.qualified_name() == name)
                     {
                         match result {
                             Ok(details) => self.details = Some(details),
@@ -296,11 +367,11 @@ impl ViewerApp {
                         }
                     }
                 }
-                TaskEvent::Page(path, name, page, result) => {
-                    if self.database_path.as_ref() == Some(&path)
+                TaskEvent::Page(target, name, page, result) => {
+                    if self.database_target.as_ref() == Some(&target)
                         && self
                             .selected_object()
-                            .is_some_and(|object| object.name == name)
+                            .is_some_and(|object| object.qualified_name() == name)
                         && self.page == page
                     {
                         match result {
@@ -315,8 +386,11 @@ impl ViewerApp {
                         }
                     }
                 }
-                TaskEvent::Query(result) => {
+                TaskEvent::Query(target, result) => {
                     self.query_running = false;
+                    if self.database_target.as_ref() != Some(&target) {
+                        continue;
+                    }
                     match result {
                         Ok(rows) => {
                             self.status = format!(
@@ -333,8 +407,11 @@ impl ViewerApp {
                         Err(error) => self.error = Some(format!("Query failed: {error}")),
                     }
                 }
-                TaskEvent::Exported(path, result) => {
+                TaskEvent::Exported(target, path, result) => {
                     self.export_running = false;
+                    if self.database_target.as_ref() != Some(&target) {
+                        continue;
+                    }
                     match result {
                         Ok(rows) => {
                             self.status = format!("Exported {rows} row(s) to {}", path.display())
@@ -356,9 +433,9 @@ impl eframe::App for ViewerApp {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(&self.status);
-                if let Some(path) = &self.database_path {
+                if let Some(target) = &self.database_target {
                     ui.separator();
-                    ui.label(path.display().to_string());
+                    ui.label(target.label());
                 }
             });
         });
@@ -386,9 +463,25 @@ impl eframe::App for ViewerApp {
                     }
                 });
         }
+        self.open_dialogs(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.settings.save();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn postgresql_form_requires_valid_fields_and_port() {
+        let mut form = PgForm::new();
+        assert!(!form.valid());
+        form.database = "app".into();
+        form.user = "alice".into();
+        assert!(form.valid());
+        form.port = "70000".into();
+        assert!(!form.valid());
     }
 }

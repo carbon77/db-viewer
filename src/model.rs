@@ -1,9 +1,88 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PgSslMode {
+    Disable,
+    #[default]
+    Prefer,
+    Require,
+}
+
+impl PgSslMode {
+    pub const ALL: [Self; 3] = [Self::Disable, Self::Prefer, Self::Require];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Disable => "Disable",
+            Self::Prefer => "Prefer",
+            Self::Require => "Require",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DatabaseTarget {
+    SQLite {
+        path: PathBuf,
+    },
+    PostgreSQL {
+        host: String,
+        port: u16,
+        database: String,
+        user: String,
+        #[serde(skip, default)]
+        password: String,
+        ssl_mode: PgSslMode,
+    },
+}
+
+impl DatabaseTarget {
+    pub fn label(&self) -> String {
+        match self {
+            Self::SQLite { path } => path.display().to_string(),
+            Self::PostgreSQL {
+                host,
+                port,
+                database,
+                user,
+                ..
+            } => format!("{user}@{host}:{port}/{database}"),
+        }
+    }
+    pub fn without_password(&self) -> Self {
+        let mut value = self.clone();
+        if let Self::PostgreSQL { password, .. } = &mut value {
+            password.clear();
+        }
+        value
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+    #[test]
+    fn postgresql_label_is_redacted() {
+        let target = DatabaseTarget::PostgreSQL {
+            host: "server".into(),
+            port: 5432,
+            database: "data".into(),
+            user: "alice".into(),
+            password: "top-secret".into(),
+            ssl_mode: PgSslMode::Prefer,
+        };
+        assert_eq!(target.label(), "alice@server:5432/data");
+        assert!(!target.label().contains("secret"));
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectKind {
     Table,
+    PartitionedTable,
     View,
+    MaterializedView,
     Index,
     Trigger,
 }
@@ -12,7 +91,9 @@ impl ObjectKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Table => "Tables",
+            Self::PartitionedTable => "Partitioned tables",
             Self::View => "Views",
+            Self::MaterializedView => "Materialized views",
             Self::Index => "Indexes",
             Self::Trigger => "Triggers",
         }
@@ -22,9 +103,29 @@ impl ObjectKind {
 #[derive(Debug, Clone)]
 pub struct SchemaObject {
     pub kind: ObjectKind,
+    pub schema: String,
     pub name: String,
     pub table_name: String,
     pub sql: String,
+}
+
+impl SchemaObject {
+    pub fn qualified_name(&self) -> String {
+        if self.schema.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{}.{}", self.schema, self.name)
+        }
+    }
+    pub fn is_data_source(&self) -> bool {
+        matches!(
+            self.kind,
+            ObjectKind::Table
+                | ObjectKind::PartitionedTable
+                | ObjectKind::View
+                | ObjectKind::MaterializedView
+        )
+    }
 }
 
 #[derive(Debug, Clone)]

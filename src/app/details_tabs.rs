@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 impl ViewerApp {
     pub(super) fn structure_tab(&self, ui: &mut egui::Ui) {
-        let Some(details) = &self.details else {
+        let Some(details) = self.active().and_then(|s| s.details.as_ref()) else {
             ui.label("Select a schema object.");
             return;
         };
@@ -51,7 +51,7 @@ impl ViewerApp {
     }
 
     pub(super) fn definition_tab(&self, ui: &mut egui::Ui) {
-        if let Some(object) = self.selected_object() {
+        if let Some(object) = self.active().and_then(|s| s.selected_object()) {
             let mut sql = object.sql.clone();
             ui.add(
                 egui::TextEdit::multiline(&mut sql)
@@ -66,36 +66,41 @@ impl ViewerApp {
     }
 
     pub(super) fn sql_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let Some(index) = self.active_index() else {
+            return;
+        };
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(
-                    self.database_target.is_some() && !self.query_running,
+                    self.sessions[index].query_request.is_none(),
                     egui::Button::new("Run (Ctrl+Enter)"),
                 )
                 .clicked()
             {
                 self.run_query(ctx);
             }
-            if self.query_running && ui.button("Cancel").clicked() {
-                self.query_cancel.store(true, Ordering::Relaxed);
-                self.status = "Cancelling query…".into();
+            if self.sessions[index].query_request.is_some() && ui.button("Cancel").clicked() {
+                self.sessions[index]
+                    .query_cancel
+                    .store(true, Ordering::Relaxed);
+                self.sessions[index].status = "Cancelling query…".into();
             }
             ui.label(format!("Read-only · display limit {QUERY_CAP} rows"));
         });
         ui.add(
-            egui::TextEdit::multiline(&mut self.sql)
+            egui::TextEdit::multiline(&mut self.sessions[index].sql)
                 .font(egui::TextStyle::Monospace)
                 .desired_rows(10)
                 .desired_width(f32::INFINITY)
                 .hint_text("Enter one read-only SQL statement"),
         );
-        if !self.query_running
+        if self.sessions[index].query_request.is_none()
             && ctx.input(|input| input.modifiers.ctrl && input.key_pressed(egui::Key::Enter))
         {
             self.run_query(ctx);
         }
         ui.separator();
-        if let Some(result) = &self.query_result {
+        if let Some(result) = &self.sessions[index].query_result {
             if result.truncated {
                 ui.colored_label(
                     egui::Color32::YELLOW,

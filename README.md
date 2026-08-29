@@ -17,6 +17,7 @@ enforces read-only access while browsing, filtering, querying, and exporting.
 - Run a single read-only SQL statement with a 10,000-row display limit.
 - Export complete filtered tables, views, or query results to UTF-8 CSV.
 - Cancel long-running queries and exports.
+- Keep multiple SQLite and PostgreSQL connections open in independent tabs.
 - Switch between light and dark themes and reopen recent databases.
 
 ## Install
@@ -35,8 +36,10 @@ Windows may display a SmartScreen warning.
 1. Start DB Viewer and select **Open**.
 2. Choose **SQLite** and select a `.db`, `.sqlite`, or `.sqlite3` file, or choose
    **PostgreSQL** and enter the server, database, and account details.
-3. Select an object in the schema sidebar to inspect its data, structure, or SQL definition.
-4. Use the SQL Editor for one read-only statement at a time, or export the current table, view, or query to CSV.
+3. Use **Open** or the **+** connection tab to open more databases, and switch between
+   them without losing each connection's browsing, filtering, or SQL editor state.
+4. Select an object in the schema sidebar to inspect its data, structure, or SQL definition.
+5. Use the SQL Editor for one read-only statement at a time, or export the current table, view, or query to CSV.
 
 SQLite databases are opened with the read-only flag. Every PostgreSQL operation
 uses a separate connection and a read-only transaction, so writes (including

@@ -57,6 +57,10 @@ fn connect(target: &DatabaseTarget) -> Result<Client> {
     }
 }
 
+pub fn test_connection(target: &DatabaseTarget) -> Result<()> {
+    connect(target).map(|_| ())
+}
+
 fn read_only(client: &mut Client) -> Result<()> {
     client.batch_execute("BEGIN READ ONLY")?;
     Ok(())

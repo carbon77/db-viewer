@@ -57,6 +57,51 @@ impl DatabaseTarget {
         }
         value
     }
+    pub fn same_connection(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::SQLite { path: a }, Self::SQLite { path: b }) => {
+                normalized_path(a) == normalized_path(b)
+            }
+            (
+                Self::PostgreSQL {
+                    host: ah,
+                    port: ap,
+                    database: ad,
+                    user: au,
+                    ssl_mode: am,
+                    ..
+                },
+                Self::PostgreSQL {
+                    host: bh,
+                    port: bp,
+                    database: bd,
+                    user: bu,
+                    ssl_mode: bm,
+                    ..
+                },
+            ) => ah.eq_ignore_ascii_case(bh) && ap == bp && ad == bd && au == bu && am == bm,
+            _ => false,
+        }
+    }
+    pub fn compact_label(&self) -> String {
+        match self {
+            Self::SQLite { path } => path
+                .file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+                .into_owned(),
+            Self::PostgreSQL { host, database, .. } => format!("{database}@{host}"),
+        }
+    }
+}
+
+fn normalized_path(path: &std::path::Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    std::fs::canonicalize(&absolute).unwrap_or(absolute)
 }
 
 #[cfg(test)]
@@ -74,6 +119,33 @@ mod target_tests {
         };
         assert_eq!(target.label(), "alice@server:5432/data");
         assert!(!target.label().contains("secret"));
+    }
+    #[test]
+    fn postgresql_identity_ignores_password_and_host_case() {
+        let a = DatabaseTarget::PostgreSQL {
+            host: "SERVER".into(),
+            port: 5432,
+            database: "data".into(),
+            user: "alice".into(),
+            password: "one".into(),
+            ssl_mode: PgSslMode::Prefer,
+        };
+        let mut b = a.clone();
+        if let DatabaseTarget::PostgreSQL { host, password, .. } = &mut b {
+            *host = "server".into();
+            *password = "two".into();
+        }
+        assert!(a.same_connection(&b));
+    }
+    #[test]
+    fn sqlite_identity_normalizes_relative_paths() {
+        let a = DatabaseTarget::SQLite {
+            path: PathBuf::from("sample.db"),
+        };
+        let b = DatabaseTarget::SQLite {
+            path: std::env::current_dir().unwrap().join("sample.db"),
+        };
+        assert!(a.same_connection(&b));
     }
 }
 

@@ -92,6 +92,10 @@ pub fn target_schema(target: &DatabaseTarget) -> Result<Vec<SchemaObject>> {
     }
 }
 
+pub fn test_postgresql_connection(target: &DatabaseTarget) -> Result<()> {
+    postgres_backend::test_connection(target)
+}
+
 pub fn target_details(target: &DatabaseTarget, object: &SchemaObject) -> Result<ObjectDetails> {
     match target {
         DatabaseTarget::SQLite { path } => load_details(path, &object.name),

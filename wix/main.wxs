@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="Rust DB Viewer"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="Rust DB Viewer"
+           UpgradeCode="54B37B88-6C4A-4A29-91A5-01EE0B244E23">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Rust DB Viewer is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Rust DB Viewer" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="Rust DB Viewer" />
+      </Directory>
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="ApplicationFiles" Guid="55F9EF1E-BD53-436A-8689-3BC4EBC59BE8" Win64="yes">
+        <File Id="ViewerExecutable"
+              Source="$(var.CargoTargetBinDir)\rust-db-viewer.exe"
+              KeyPath="yes">
+          <Shortcut Id="StartMenuShortcut"
+                    Directory="ApplicationProgramsFolder"
+                    Name="Rust DB Viewer"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Advertise="yes" />
+        </File>
+        <RemoveFolder Id="RemoveProgramsFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="ProductFeature" Title="Rust DB Viewer" Level="1">
+      <ComponentRef Id="ApplicationFiles" />
+    </Feature>
+  </Product>
+</Wix>

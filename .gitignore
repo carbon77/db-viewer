@@ -1,0 +1,5 @@
+/target
+/.idea
+*.msi
+*.wixobj
+*.wixpdb

@@ -1,6 +1,6 @@
 [package]
 name = "rust-db-viewer"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A native, read-only SQLite and PostgreSQL database viewer for Windows"
 license = "MIT"

@@ -69,7 +69,7 @@ impl ViewerApp {
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(
-                    self.database_path.is_some() && !self.query_running,
+                    self.database_target.is_some() && !self.query_running,
                     egui::Button::new("Run (Ctrl+Enter)"),
                 )
                 .clicked()

@@ -15,6 +15,33 @@ permissions:
   contents: read
 
 jobs:
+  postgresql-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      POSTGRES_TEST_PASSWORD: postgres
+      POSTGRES_TEST_HOST: localhost
+      POSTGRES_TEST_PORT: 5432
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux GUI build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Run PostgreSQL integration tests
+        run: cargo test --locked postgresql_integration -- --nocapture
+
   verify:
     runs-on: windows-latest
     steps:

@@ -1,7 +1,9 @@
 use crate::model::{
-    CellValue, ColumnInfo, FilterOperator, FilterSpec, ForeignKeyInfo, ObjectDetails, ObjectKind,
-    RowSet, SchemaObject, SortDirection, SortSpec,
+    CellValue, ColumnInfo, DatabaseTarget, FilterOperator, FilterSpec, ForeignKeyInfo,
+    ObjectDetails, ObjectKind, RowSet, SchemaObject, SortDirection, SortSpec,
 };
+#[path = "postgres_backend.rs"]
+mod postgres_backend;
 use rusqlite::{Connection, OpenFlags, params_from_iter, types::ValueRef};
 use std::{
     fs::File,
@@ -22,6 +24,10 @@ pub enum DbError {
     Io(#[from] std::io::Error),
     #[error("CSV error: {0}")]
     Csv(#[from] csv::Error),
+    #[error("PostgreSQL error: {0}")]
+    Postgres(#[from] postgres::Error),
+    #[error("TLS error: {0}")]
+    Tls(#[from] native_tls::Error),
     #[error("Only one read-only SQL statement can be executed")]
     NotReadOnly,
 }
@@ -62,12 +68,99 @@ pub fn load_schema(path: &Path) -> Result<Vec<SchemaObject>> {
         };
         Ok(SchemaObject {
             kind,
+            schema: String::new(),
             name: row.get(1)?,
             table_name: row.get(2)?,
             sql: row.get(3)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+pub fn qualify_identifier(schema: &str, name: &str) -> String {
+    if schema.is_empty() {
+        quote_identifier(name)
+    } else {
+        format!("{}.{}", quote_identifier(schema), quote_identifier(name))
+    }
+}
+
+pub fn target_schema(target: &DatabaseTarget) -> Result<Vec<SchemaObject>> {
+    match target {
+        DatabaseTarget::SQLite { path } => load_schema(path),
+        DatabaseTarget::PostgreSQL { .. } => postgres_backend::load_schema(target),
+    }
+}
+
+pub fn target_details(target: &DatabaseTarget, object: &SchemaObject) -> Result<ObjectDetails> {
+    match target {
+        DatabaseTarget::SQLite { path } => load_details(path, &object.name),
+        DatabaseTarget::PostgreSQL { .. } => postgres_backend::load_details(target, object),
+    }
+}
+
+pub fn target_page(
+    target: &DatabaseTarget,
+    object: &SchemaObject,
+    filters: &[FilterSpec],
+    sort: Option<&SortSpec>,
+    offset: usize,
+    limit: usize,
+) -> Result<(RowSet, u64)> {
+    match target {
+        DatabaseTarget::SQLite { path } => {
+            load_page(path, &object.name, filters, sort, offset, limit)
+        }
+        DatabaseTarget::PostgreSQL { .. } => {
+            postgres_backend::load_page(target, object, filters, sort, offset, limit)
+        }
+    }
+}
+
+pub fn target_query(
+    target: &DatabaseTarget,
+    sql: &str,
+    cap: usize,
+    cancel: Arc<AtomicBool>,
+) -> Result<RowSet> {
+    match target {
+        DatabaseTarget::SQLite { path } => execute_query(path, sql, cap, cancel),
+        DatabaseTarget::PostgreSQL { .. } => {
+            postgres_backend::execute_query(target, sql, cap, cancel)
+        }
+    }
+}
+
+pub fn target_export_table(
+    target: &DatabaseTarget,
+    object: &SchemaObject,
+    filters: &[FilterSpec],
+    sort: Option<&SortSpec>,
+    destination: &Path,
+    cancel: Arc<AtomicBool>,
+) -> Result<u64> {
+    match target {
+        DatabaseTarget::SQLite { path } => {
+            export_table(path, &object.name, filters, sort, destination, cancel)
+        }
+        DatabaseTarget::PostgreSQL { .. } => {
+            postgres_backend::export_table(target, object, filters, sort, destination, cancel)
+        }
+    }
+}
+
+pub fn target_export_query(
+    target: &DatabaseTarget,
+    sql: &str,
+    destination: &Path,
+    cancel: Arc<AtomicBool>,
+) -> Result<u64> {
+    match target {
+        DatabaseTarget::SQLite { path } => export_query(path, sql, destination, cancel),
+        DatabaseTarget::PostgreSQL { .. } => {
+            postgres_backend::export_query(target, sql, destination, cancel)
+        }
+    }
 }
 
 pub fn load_details(path: &Path, object_name: &str) -> Result<ObjectDetails> {
@@ -307,6 +400,10 @@ mod tests {
     #[test]
     fn identifiers_are_safely_quoted() {
         assert_eq!(quote_identifier("a\"b"), "\"a\"\"b\"");
+        assert_eq!(
+            qualify_identifier("odd schema", "a\"b"),
+            "\"odd schema\".\"a\"\"b\""
+        );
     }
 
     #[test]
